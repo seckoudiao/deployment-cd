@@ -1,0 +1,214 @@
+# Déploiement de Jangalma : toutes les images sont récupérées depuis Docker Hub (aucun build ici,
+# sauf la petite image MySQL qui embarque les scripts d'initialisation).
+#
+# Lancement : docker compose --env-file .env --env-file secrets.env up -d
+# Arrêt     : docker compose --env-file .env --env-file secrets.env down   (jamais -v : supprimerait les données)
+
+name: jangalma
+
+# ---------- Blocs réutilisables (ancres YAML) ----------
+
+# Variables communes à tous les microservices Spring Boot
+x-backend-env: &backend-env
+  EUREKA_URL: http://eureka-server:8761/eureka/
+  DB_USERNAME: ${DB_USERNAME}
+  DB_PASSWORD: ${DB_PASSWORD}
+  JWT_SECRET: ${JWT_SECRET}
+  JWT_ISSUER: ${JWT_ISSUER}
+  INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+
+# Réglages communs : redémarrage automatique et mémoire limitée (Java en utilise 75 %)
+x-backend: &backend
+  restart: unless-stopped
+  mem_limit: 512m
+  depends_on:
+    mysql:
+      condition: service_healthy
+    eureka-server:
+      condition: service_healthy
+
+# Paramètres des health checks Java (démarrage lent : 90 s de grâce)
+x-java-health: &java-health
+  interval: 15s
+  timeout: 5s
+  retries: 10
+  start_period: 90s
+
+services:
+
+  # ==========================================
+  # INFRASTRUCTURE
+  # ==========================================
+
+  mysql:
+    # Image MySQL officielle + nos scripts d'initialisation (voir mysql/Dockerfile)
+    build: ./mysql
+    image: jangalma-mysql:local
+    pull_policy: build                       # image construite en local : "docker compose pull" l'ignore (sinon erreur, bloquante en CD)
+    restart: unless-stopped
+    mem_limit: 768m
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      # Utilisés par le script 01-create-databases.sh pour créer l'utilisateur applicatif
+      APP_DB_USER: ${DB_USERNAME}
+      APP_DB_PASSWORD: ${DB_PASSWORD}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql_data:/var/lib/mysql            # PERSISTANCE : les données survivent aux redéploiements
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  minio:
+    # Stockage des fichiers déposés (cours, TD, PDF...)
+    # L'image officielle minio/minio n'est plus publiée sur Docker Hub (MinIO a arrêté les images communautaires).
+    # pgsty/minio : fork communautaire maintenu, même binaire, même entrypoint et client mc inclus (healthcheck inchangé).
+    image: pgsty/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data                     # PERSISTANCE : les fichiers survivent aux redéploiements
+    ports:
+      - "127.0.0.1:9001:9001"                # console MinIO, accessible uniquement depuis ce PC
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ==========================================
+  # SERVICE DISCOVERY
+  # ==========================================
+
+  eureka-server:
+    image: ${IMAGE_PREFIX}eureka-server:${BACKEND_TAG}
+    restart: unless-stopped
+    mem_limit: 384m
+    environment:
+      EUREKA_URL: http://eureka-server:8761/eureka/
+    ports:
+      - "127.0.0.1:8761:8761"                # tableau de bord Eureka, accessible uniquement depuis ce PC
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8761/actuator/health"]
+      <<: *java-health
+
+  # ==========================================
+  # MICROSERVICES (aucun port publié : joignables uniquement via la gateway)
+  # ==========================================
+
+  identity-service:
+    <<: *backend
+    image: ${IMAGE_PREFIX}identity-service:${BACKEND_TAG}
+    environment:
+      <<: *backend-env
+      DB_URL: jdbc:mysql://mysql:3306/identity_db?useSSL=false&allowPublicKeyRetrieval=true
+      INSTITUTION_DB_URL: jdbc:mysql://mysql:3306/institution_db?useSSL=false&allowPublicKeyRetrieval=true
+      ACADEMIC_SERVICE_URL: http://academic-service:8082
+      MATCHING_SERVICE_URL: http://matching-service:8083
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/actuator/health"]
+      <<: *java-health
+
+  academic-service:
+    <<: *backend
+    image: ${IMAGE_PREFIX}academic-service:${BACKEND_TAG}
+    environment:
+      <<: *backend-env
+      ACADEMIC_DB_URL: jdbc:mysql://mysql:3306/academic_db?useSSL=false&allowPublicKeyRetrieval=true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8082/actuator/health"]
+      <<: *java-health
+
+  matching-service:
+    <<: *backend
+    image: ${IMAGE_PREFIX}matching-service:${BACKEND_TAG}
+    environment:
+      <<: *backend-env
+      MATCHING_DB_URL: jdbc:mysql://mysql:3306/matching_db?useSSL=false&allowPublicKeyRetrieval=true
+      ACADEMIC_SERVICE_URL: http://academic-service:8082
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8083/actuator/health"]
+      <<: *java-health
+
+  resource-service:
+    <<: *backend
+    image: ${IMAGE_PREFIX}resource-service:${BACKEND_TAG}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      <<: *backend-env
+      RESOURCE_DB_URL: jdbc:mysql://mysql:3306/resource_db?useSSL=false&allowPublicKeyRetrieval=true
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8084/actuator/health"]
+      <<: *java-health
+
+  notification-service:
+    <<: *backend
+    image: ${IMAGE_PREFIX}notification-service:${BACKEND_TAG}
+    environment:
+      <<: *backend-env
+      NOTIFICATION_DB_URL: jdbc:mysql://mysql:3306/notification_db?useSSL=false&allowPublicKeyRetrieval=true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8085/actuator/health"]
+      <<: *java-health
+
+  # ==========================================
+  # PASSERELLE API (point d'entrée du backend, joint par le frontend via nginx)
+  # ==========================================
+
+  api-gateway:
+    image: ${IMAGE_PREFIX}api-gateway:${BACKEND_TAG}
+    restart: unless-stopped
+    mem_limit: 512m
+    environment:
+      EUREKA_URL: http://eureka-server:8761/eureka/
+      JWT_SECRET: ${JWT_SECRET}
+    depends_on:
+      eureka-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/actuator/health"]
+      <<: *java-health
+
+  # ==========================================
+  # FRONTEND (seul service exposé aux utilisateurs)
+  # ==========================================
+
+  frontend:
+    image: ${IMAGE_PREFIX}frontend:${FRONTEND_TAG}
+    restart: unless-stopped
+    mem_limit: 128m
+    ports:
+      - "${APP_PORT}:8080"                   # http://localhost:${APP_PORT}
+    depends_on:
+      - api-gateway
+    healthcheck:
+      # 127.0.0.1 et pas localhost : dans l'image alpine, localhost résout d'abord en IPv6 (::1)
+      # alors que nginx n'écoute qu'en IPv4 ("listen 8080") -> "Connection refused"
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  mysql_data:
+  minio_data:
