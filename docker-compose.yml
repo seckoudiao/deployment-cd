@@ -8,6 +8,13 @@ name: jangalma
 
 # ---------- Blocs réutilisables (ancres YAML) ----------
 
+# Découverte rapide des instances (déploiement sans coupure) : par défaut Eureka et le load balancer
+# mettent jusqu'à ~95 s à voir une instance apparaître ou disparaître ; ici ~15 s.
+# Variables Spring (relaxed binding) : aucune modification du code des services.
+x-discovery-rapide: &discovery-rapide
+  EUREKA_CLIENT_REGISTRYFETCHINTERVALSECONDS: "5"
+  SPRING_CLOUD_LOADBALANCER_CACHE_TTL: 5s
+
 # Variables communes à tous les microservices Spring Boot
 x-backend-env: &backend-env
   EUREKA_URL: http://eureka-server:8761/eureka/
@@ -16,6 +23,7 @@ x-backend-env: &backend-env
   JWT_SECRET: ${JWT_SECRET}
   JWT_ISSUER: ${JWT_ISSUER}
   INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+  <<: *discovery-rapide
 
 # Réglages communs : redémarrage automatique et mémoire limitée (Java en utilise 75 %)
 x-backend: &backend
@@ -95,6 +103,8 @@ services:
     mem_limit: 384m
     environment:
       EUREKA_URL: http://eureka-server:8761/eureka/
+      # Cache des réponses du registre rafraîchi toutes les 3 s (30 s par défaut)
+      EUREKA_SERVER_RESPONSECACHEUPDATEINTERVALMS: "3000"
     ports:
       - "127.0.0.1:8761:8761"                # tableau de bord Eureka, accessible uniquement depuis ce PC
     healthcheck:
@@ -186,6 +196,7 @@ services:
     environment:
       EUREKA_URL: http://eureka-server:8761/eureka/
       JWT_SECRET: ${JWT_SECRET}
+      <<: *discovery-rapide
     depends_on:
       eureka-server:
         condition: service_healthy

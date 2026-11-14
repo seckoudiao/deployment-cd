@@ -1,2 +1,5 @@
 # Secrets du déploiement : jamais dans Git
 secrets.env
+
+# Rapport généré à chaque déploiement (archivé par Jenkins)
+deploy-report.txt
