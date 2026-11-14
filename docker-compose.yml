@@ -114,6 +114,11 @@ services:
       INSTITUTION_DB_URL: jdbc:mysql://mysql:3306/institution_db?useSSL=false&allowPublicKeyRetrieval=true
       ACADEMIC_SERVICE_URL: http://academic-service:8082
       MATCHING_SERVICE_URL: http://matching-service:8083
+      # Administrateur initial, créé au démarrage s'il n'existe pas (email dans .env, mot de passe dans secrets.env)
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD}
+      BOOTSTRAP_ADMIN_NOM: ${BOOTSTRAP_ADMIN_NOM}
+      BOOTSTRAP_ADMIN_PRENOM: ${BOOTSTRAP_ADMIN_PRENOM}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8081/actuator/health"]
       <<: *java-health
